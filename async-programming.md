@@ -1,5 +1,5 @@
 # Asynchronous Programming
-*Last Updated on 16 December 2024, by Wilson Xu*
+*Last Updated on 21 December 2024, by Wilson Xu*
 
 ## 📚 Why Asynchronous Programming is Needed
 
@@ -74,12 +74,13 @@ task times                    duration
     - returns a Futures object that represents the eventual results of asychronous operation
 5. `asyncio.run(main())`
     - Entry point for async programs
-    - Manages the async event loop
+    - Creates and manages the async event loop
     - Runs the main coroutine and handles its completion
     - Replaces traditional synchronous program entry points
 
 ### Example Implementation
 
+Python version >= 3.11: using `asyncio.TaskGroup()`to create and run tasks concurrently
  ```python
 import asyncio
 
@@ -90,30 +91,237 @@ async def fetch_data(delay):
     return f"Data from {delay}s task"
 
 async def main():
-    # Create multiple tasks to run concurrently
-    # Python 3.11: asyncio.TaskGroup class is a more modern alternative to create and running tasks, await is implicit when context manager exits
-    # It also implements internal cancellation, if one task fails with an unhandled exception, all remaining tasks will be cancelled
+    # await is implicit when context manager exits
+    # context manager ensures resources are closed at the end
+    # it also implements internal cancellation; all remaining tasks will be cancelled if one tasks encounters unhandled exception
     async with asyncio.TaskGroup() as tg:
         task_one = tg.create_task(fetch_data(2))
         task_two = tg.create_task(fetch_data(1))        
         results = [task_one.result(), task_two.result()] 
 
-    # Older method: using asyncio.gather
-    # task_one = asyncio.create_task(fetch_data(2))
-    # task_two = asyncio.create_task(fetch_data(1))
-    # futures = asyncio.gather(task_one, task_two)
-    # results = await futures  # returns an iterator of results; you can also await each task individually, e.g. result_one = await task_one
-    print("All tasks completed:", results)
-
 # Run the main coroutine
 asyncio.run(main())
 ```
 
-## 💻 Asyncio with FastAPI 
-
-### Example 1: FastAPI HTTP Endpoint
+Python version < 3.11: using `asyncio.gather()` to create and run tasks concurrently
 <details><summary>Show code</summary>
 
+
+```python
+async def main():
+    task_one = asyncio.create_task(fetch_data(2))
+    task_two = asyncio.create_task(fetch_data(1))
+    futures = asyncio.gather(task_one, task_two)
+    results = await futures  # returns an iterator of results; you can also await each task individually, e.g. result_one = await task_one
+    print("All tasks completed:", results)
+```
+</details>
+
+## ❌ Common mistakes when implementing `asyncio`
+
+### Blocking code in async function
+Blocking operations halt the event loop, defeating the purpose of asynchronous programming. Use async library instead to run operations.
+```python
+# Wrong
+async def main():
+    print("Start sleeping...")
+    time.sleep(3)  # This blocks the event loop!
+    print("Done sleeping!")
+
+# Correct
+async def main():
+    print("Start sleeping...")
+    await asyncio.sleep(3)  # Non-blocking sleep
+    print("Done sleeping!")
+```
+```python
+# Wrong
+async def fetch_url():
+    print("Fetching URL...")
+    response = requests.get("https://example.com")  # This blocks the event loop!
+    print(f"Response: {response.status_code}")
+
+# Correct
+async def fetch_url():
+    async with aiohttp.ClientSession() as session:
+        print("Fetching URL...")
+        async with session.get("https://example.com") as response:
+            print(f"Response: {response.status}")
+
+```
+```python
+# Wrong
+async def read_file():
+    print("Reading file...")
+    with open("example.txt", "r") as f:  # Blocking operation
+        data = f.read()
+    print(f"File content: {data}")
+
+# Correct
+async def read_file():
+    print("Reading file...")
+    async with aiofiles.open("example.txt", "r") as f:
+        data = await f.read()  # Non-blocking file read
+    print(f"File content: {data}")
+```
+
+### Blocking the event loop with synchronous code
+Sync code (especially CPU-bound tasks) can block the event loop, reducing the efficiency of async programs.
+Avoid long-running sync operations in async code or run sync code in a separate thread or process.
+
+```python
+def compute():
+    # Simulate a long-running computation
+    total = 0
+    for i in range(10**7):
+        total += i
+    return total
+
+# Wrong
+async def main():
+    print("Starting computation...")
+    result = compute()  # Blocking the event loop!
+    print(f"Computation result: {result}")
+
+# Correct
+async def main():
+    print("Starting computation...")
+    result = await asyncio.to_thread(compute)  # Offloading to a thread
+    print(f"Computation result: {result}")
+```
+```python
+# Example where there's both async and sync code mixing
+
+# Synchronous function (CPU-bound task)
+def cpu_bound_task(n):
+    print(f"Starting CPU-bound task for {n} iterations...")
+    total = sum(i ** 2 for i in range(n))  # Simulate intensive computation
+    print(f"CPU-bound task completed with result: {total}")
+    return total
+
+# Asynchronous function (I/O-bound task)
+async def async_io_task(url):
+    print(f"Fetching data from {url}...")
+    await asyncio.sleep(2)  # Simulating network delay
+    print(f"Data fetched from {url}.")
+
+# Combined main function
+async def main():
+    url = "https://example.com"
+    iterations = 10**6
+
+    # Offload the synchronous task to a thread
+    cpu_task = asyncio.to_thread(cpu_bound_task, iterations)  # For heavy CPU-bound tasks, consider ProcessPoolExecutor (Parallelism)
+
+    # Run the async I/O task concurrently
+    io_task = async_io_task(url)
+
+    # Await both tasks
+    await asyncio.gather(cpu_task, io_task)
+```
+Visual timeline:
+```
+Time → 
+Task 1 (cpu_task):  ──> Offloaded to Thread ──> Running ─> Done
+Task 2 (io_task):   → Yield → Waiting for I/O → Resume → Done
+Event Loop:         → Schedule → Manage Tasks → Handle Async Work
+
+```
+### Not handling task cancellation
+Cancelled tasks might leave resources in an inconsistent state. Tasks are cancelled automatically due to timeout, when another task in the group fails, or when the event loop is terminated. Raise exception handling to handle cancellation and also catch it from the main coroutine.
+```python
+asyncio.TimeoutError  # exception for timeout
+asyncio.CancelledError  # exception for task fail or event loop termination
+```
+
+```python
+async def task():
+    try:
+        print("Task started...")
+        await asyncio.sleep(5)
+        print("Task completed.")
+    except asyncio.CancelledError:
+        print("Task was cancelled! Cleaning up resources...")
+        raise  # Re-raise to propagate the cancellation
+
+async def main():
+    t = asyncio.create_task(task())
+    await asyncio.sleep(1)
+    t.cancel()
+    try:
+        await t
+    except asyncio.CancelledError:
+        print("Handled cancellation in main.")
+```
+
+### Neglecting the event loop policy for Windows OS
+Windows uses a different default event loop policy (SelectorEventLoop) which may not support certain features like subprocesses. Explicitly set the event loop policy on Windows if needed, particularly for subprocess support.
+```python
+import platform
+
+if platform.system() == "Windows":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+```
+
+### Overlooking debugging tools
+Ignoring debugging tools for async programs, making errors harder to trace. Debugging async code can be more complex than sync code.
+Use asyncio’s debugging features (e.g., `asyncio.run(debug=True))`, log exceptions using `asyncio.Task`, and leverage tools like aiomonitor).
+
+### Forgetting to handle timeout
+Failing to set timeouts for long-running operations, unresponsive tasks can hang indefinitely. Use asyncio.wait_for() or timeouts in libraries like aiohttp.
+```python
+# wrong
+async def long_running_task():
+    await asyncio.sleep(10)
+
+async def main():
+    await long_running_task()  # Hangs indefinitely
+# right
+async def main():
+    try:
+        await asyncio.wait_for(long_running_task(), timeout=5)
+    except asyncio.TimeoutError:
+        print("Task timed out!")
+```
+
+### Overloading the event loop
+Spawning too many tasks, overwhelming the event loop. The event loop might become sluggish or run out of resources. Limit concurrent tasks with mechanisms like asyncio.Semaphore.
+```python
+# wrong
+async def task():
+    await asyncio.sleep(1)
+
+async def main():
+    tasks = [task() for _ in range(100000)]  # Too many tasks
+    await asyncio.gather(*tasks)
+
+# right
+sem = asyncio.Semaphore(10)
+
+async def task():
+    async with sem:
+        await asyncio.sleep(1)
+
+async def main():
+    tasks = [task() for _ in range(1000)]
+    await asyncio.gather(*tasks)
+```
+
+## 🗃️ Other useful asyncio functions:
+| Primitive         | Use Case                                   | Example Use Case                                      |
+|--------------------|-------------------------------------------|-----------------------------------------------------|
+| `asyncio.Lock`     | Prevent concurrent access to resources    | Updating a shared variable                          |
+| `asyncio.Event`    | Notify tasks of a condition               | Signal completion of a task                        |
+| `asyncio.Condition`| Notify multiple tasks of a condition      | Coordinate threads waiting for a specific state    |
+| `asyncio.Semaphore`| Limit the number of concurrent tasks      | Restrict HTTP connections to an API                |
+| `asyncio.Queue`    | FIFO task communication                   | Producer-consumer model                            |
+| `asyncio.PriorityQueue` | Priority-based task communication    | Task scheduling based on priority                  |
+| `asyncio.LifoQueue`| LIFO task communication                   | Reverse-order processing (e.g., undo operations)   |
+
+
+## 💻 Asyncio with FastAPI 
+FastAPI is commonly used as a backend framework for web applications. Here are some useful code snippets on implementing async programming to FastAPI
+### REST APIs Endpoint
 ```python
 app = FastAPI()
 
@@ -127,13 +335,9 @@ async def read_user(user_id: int):
     # Await an async function to fetch user data
     user_data = await get_user_data(user_id)
     return user_data
-
 ```
-</details>
 
-### Example 2: FastAPI WebSocket Endpoint
-<details><summary>Show code</summary>
-
+### WebSocket Endpoint
 ```python
 app = FastAPI()
 
@@ -156,27 +360,51 @@ async def websocket_endpoint(websocket: WebSocket, user_id: int):
     except WebSocketDisconnect:
         print(f"User {user_id} disconnected")
 ```
-</details>
 
-### Example 3: FastAPI startup_events
-<details><summary>Show code</summary>
-
+### Lifespan Events
 ```python
+# Example shared resource
+class SharedResource:
+    def __init__(self):
+        self.data = None
+
+    async def initialize(self):
+        print("Initializing resource...")
+        await asyncio.sleep(2)  # Simulate async initialization
+        self.data = "Resource Ready"
+        print("Resource initialized.")
+
+    async def cleanup(self):
+        print("Cleaning up resource...")
+        await asyncio.sleep(1)  # Simulate async cleanup
+        self.data = None
+        print("Resource cleaned up.")
+
+# Create the shared resource instance
+shared_resource = SharedResource()
+
+# Define the FastAPI app
 app = FastAPI()
 
-async def some_async_startup_task():
-    await asyncio.sleep(2)
-    print("Startup task completed")
-
+# Define lifespan events
 @app.on_event("startup")
-async def startup_event():
-    # Perform async operations on startup
-    await some_async_startup_task()
+async def on_startup():
+    print("Application is starting...")
+    await shared_resource.initialize()
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    print("Application is shutting down...")
+    await shared_resource.cleanup()
+
+@app.get("/resource")
+async def get_resource():
+    if shared_resource.data:
+        return {"resource": shared_resource.data}
+    return {"error": "Resource not initialized"}
 ```
-</details>
 
 ### Example 4: FastAPI WebSocket Connection with Concurrency
-<details><summary>Show code</summary>
 
 ```python
 app = FastAPI()
@@ -253,26 +481,6 @@ async def websocket_client():
             response = await websocket.recv()
             print(f"Received: {response}")
 ```
-</details>
-
-
-## ✅ Best Practices in Asychronous Programming
-- timeout
-- queues: queues can be used to distribute workload between several concurrent tasks, https://docs.python.org/3/library/asyncio-queue.html
-- to_thread
-- mutual lock
-- event
-
-
-## ❌ Bad Practices in Asynchronous Programming
-
-
-
-
-
-
-
-- To cancel all tasks if one task in the group fail is automatic; previously this was done manually. [Asyncio gather() cancel all tasks if one task fails](https://superfastpython.com/asyncio-gather-cancel-all-if-one-fails/#How_to_Cancel_All_Tasks_if_One_Task_Fails_the_wrong_way)
 
 
 
@@ -290,122 +498,5 @@ async def websocket_client():
 
 
 
-## 🤯 Other Useful Primitives
-
-```
 
 
-
-### Mutual exclusion Lock
-- When two or more coroutines operate upon the same variables, it is possible to suffer race conditions
-- Mutex locks can be used to protect critical sections of code from concurrent execution; atomic blocks of codes can be made sequential
-- It is coroutine-safe, but not thread-safe or process-safe.
-
-```python
-lock = asyncio.Lock()
-
-async def modify_shared_resource():
-    global shared_resource
-    async with lock:  # Using context manager is recommended over "lock.acquire()" with "lock.release()"
-        # critical section starts
-        print(f"Resource before modification: {shared_resource}")
-        shared_resource += 1
-        print(f"Resource after modification: {shared_reousrce}")
-        # critical section ends
-
-async def main():
-    await asyncio.gather(*(modify_shared_resource() for _ in range(5)))
-
-asyncio.run(main())
-```
-
-### Event
-- An event allows communication between coroutines.
-- The event objects can be either "set" or "not set"
-- When first created, it is implicitly "not set" by default.
-
-```python
-# task coroutine
-async def task(event, number):
-    # wait for the event to be set
-    await event.wait()
-    # generate a random value between 0 and 1
-    value = random()
-    # block for a moment
-    await asyncio.sleep(value)
-    # report a message
-    print(f'Task {number} got {value}')
- 
-# main coroutine
-async def main():
-    # create a shared event object
-    event = asyncio.Event()
-    # create and run the tasks
-    tasks = [asyncio.create_task(task(event, i)) for i in range(5)]
-    # allow the tasks to start
-    print('Main blocking...')
-    await asyncio.sleep(0)
-    # start processing in all tasks
-    print('Main setting the event')
-    event.set()
-    # await for all tasks  to terminate
-    _ = await asyncio.wait(tasks)
-```
-
-### to_thread()
-- Using a blocking call (synch function) suspends the thread in which the coroutine is running (thread blocking call), instead of just suspending the current coroutine.
-- The "to_thread()" function call allows the asyncio event loop to treat a blocking function call as a coroutine and execute asynchronously using thread-based concurrency instead of coroutine-based concurrency.
-
-```python
-# blocking function
-# blocking function
-def blocking_task():
-    # report a message
-    print('task is running')
-    # block
-    time.sleep(2)
-    # report a message
-    print('task is done')
- 
-# background coroutine task
-async def background():
-    # loop forever
-    while True:
-        # report a message
-        print('>background task running')
-        # sleep for a moment
-        await asyncio.sleep(0.5)
- 
-# main coroutine
-async def main():
-    # run the background task
-    _= asyncio.create_task(background())
-    # create a coroutine for the blocking function call
-    coro = asyncio.to_thread(blocking_task)
-    # execute the call in a new thread and await the result
-    await coro
-```
-
-
-
-
-
-##  Issues with async programming
-
-
-
-
-
-
-
-
-
-
-
-Online Tutorials:
-- [https://superfastpython.com/category/asyncio/]
-- [https://www.youtube.com/watch?v=Qb9s3UiMSTA]
-- [https://fastapi.tiangolo.com/async/]
-
-Last Updated: 9 December 2024
-Author: Wilson Xu
